@@ -1,56 +1,79 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 project(hft-engine LANGUAGES CXX)
 
-# -------------------------------
-# Настройки компилятора
-# -------------------------------
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)  # для LLVM/JIT
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # -------------------------------
-# Внешние зависимости
+# LLVM (Homebrew)
 # -------------------------------
-add_subdirectory(third_party/wavm)
-
-# LLVM (для Wasm -> LLVM IR -> native)
-find_package(LLVM REQUIRED CONFIG)
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-
-list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
-include(AddLLVM)
-include(HandleLLVMOptions)
-include(LLVMConfig)
-
-
-include_directories(
-    include
-    ${CMAKE_SOURCE_DIR}/third_party/wavm/Include
-    ${CMAKE_BINARY_DIR}/third_party/wavm/Include
-    ${LLVM_INCLUDE_DIRS}
+execute_process(
+    COMMAND brew --prefix llvm@18
+    OUTPUT_VARIABLE LLVM_PREFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-add_definitions(${LLVM_DEFINITIONS})
+set(LLVM_CONFIG "${LLVM_PREFIX}/bin/llvm-config")
 
+execute_process(
+    COMMAND ${LLVM_CONFIG} --cxxflags
+    OUTPUT_VARIABLE LLVM_CXXFLAGS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
 
+execute_process(
+    COMMAND ${LLVM_CONFIG} --ldflags
+    OUTPUT_VARIABLE LLVM_LDFLAGS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+execute_process(
+    COMMAND ${LLVM_CONFIG} --libs
+    OUTPUT_VARIABLE LLVM_LIBS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+execute_process(
+    COMMAND ${LLVM_CONFIG} --system-libs
+    OUTPUT_VARIABLE LLVM_SYSTEM_LIBS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+separate_arguments(LLVM_CXXFLAGS)
+separate_arguments(LLVM_LDFLAGS)
+separate_arguments(LLVM_LIBS)
+separate_arguments(LLVM_SYSTEM_LIBS)
+
+# -------------------------------
+# Исходники
+# -------------------------------
 set(HFT_SRC
-    src/MarketDataHandler.cpp
-    src/ContractLoader.cpp
+    src/main.cpp
     src/Engine.cpp
+    src/ContractLoader.cpp
+    src/MarketDataHandler.cpp
 )
-
 
 add_executable(hft-engine ${HFT_SRC})
 
-
-target_link_libraries(hft-engine PRIVATE
-    WAVM
-    WAVMIR
-    WAVMRuntime
-    ${LLVM_LIBS}
+target_include_directories(hft-engine PRIVATE
+    include
+    ${LLVM_PREFIX}/include
 )
 
 target_compile_options(hft-engine PRIVATE
-    -Wall -Wextra -Wpedantic -O3 -march=native
+    ${LLVM_CXXFLAGS}
+    -O3
+    -march=native
+    -Wall -Wextra -Wpedantic
+)
+
+target_link_options(hft-engine PRIVATE
+    ${LLVM_LDFLAGS}
+)
+
+target_link_libraries(hft-engine PRIVATE
+    ${LLVM_LIBS}
+    ${LLVM_SYSTEM_LIBS}
 )

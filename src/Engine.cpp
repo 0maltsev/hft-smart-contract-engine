@@ -1,8 +1,6 @@
 #include "Contract.h"
-#include <string>
+#include "ContractLoader.h"
 #include <iostream>
-#include <filesystem>
-#include "ContractLoader.cpp"
 
 enum class Side { Buy, Sell };
 
@@ -13,17 +11,20 @@ public:
     }
 
     void on_market_data(const std::string& symbol, double price) {
-        auto c = ContractLoader::get_contract(symbol);
+        Contract* c = ContractLoader::get_contract(symbol);
         if (!c) return;
 
-        int32_t action = c->execute(price); // zero-overhead
-        if (action == 1) {
-            send_order(symbol, Side::Sell, price + 0.01, 100);
-        }
+        int32_t action = c->execute(price);
+        if (action == 1) send_order(symbol, Side::Buy, price, 100);
+        else if (action == 2) send_order(symbol, Side::Sell, price, 100);
     }
 
 private:
-    void send_order(const std::string&, Side, double, int) {
-        // DMA/FIX
+    void send_order(const std::string& symbol, Side side, double price, int qty) {
+        std::cout << "Send order: "
+                << symbol << " "
+                << (side == Side::Buy ? "BUY" : "SELL")
+                << " " << qty
+                << " @ " << price << std::endl;
     }
 };
