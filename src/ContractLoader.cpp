@@ -52,8 +52,8 @@ Contract::FnPtr load_wasm_as_fnptr(const std::string& wasm_path) {
     if (result) throw std::runtime_error("Failed to load WASM module: " + std::string(result));
 
     IM3Function fn;
-    result = m3_FindFunction(&fn, runtime, "on_event");
-    if (result) throw std::runtime_error("Failed to find function on_event: " + std::string(result));
+    result = m3_FindFunction(&fn, runtime, "on_market_update");
+    if (result) throw std::runtime_error("Failed to find function on_market_update: " + std::string(result));
 
     // создаём адаптер для Contract::FnPtr
     return [runtime, fn](double price) -> int32_t {

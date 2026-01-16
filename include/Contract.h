@@ -1,10 +1,10 @@
 #pragma once
 #include <cstdint>
-#include <functional>   // <- добавлено для std::function
+#include <functional>
 
 class Contract {
 public:
-    using FnPtr = std::function<int(double)>;  // лямбда -> std::function
+    using FnPtr = std::function<int(double)>;
 
     explicit Contract(FnPtr fn) : fn_(fn) {}
 
