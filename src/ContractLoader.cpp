@@ -1,105 +1,102 @@
 #include "Contract.h"
+#include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <unordered_map>
+#include <memory>
 #include <vector>
 #include <string>
-#include <memory>
-#include <unordered_map>
-#include <iostream>
-#include <filesystem>
 
-#include "llvm/ExecutionEngine/Orc/LLJIT.h"
-#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
-#include "llvm/ExecutionEngine/Orc/Core.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/AsmParser/Parser.h"
+#include "m3_api_wasi.h"
+#include "m3_env.h"
 
 namespace ContractLoader {
 
-    using ContractTable = std::unordered_map<std::string, std::unique_ptr<Contract>>;
-    ContractTable contracts_;
+using ContractTable = std::unordered_map<std::string, std::unique_ptr<Contract>>;
+ContractTable contracts_;
 
-    std::unique_ptr<llvm::orc::LLJIT> JIT;
+struct WasmContract {
+    IM3Environment env;
+    IM3Runtime runtime;
+    IM3Module module;
+    IM3Function fn;
+};
 
-    std::string read_file(const std::string& path) {
-        std::ifstream file(path);
-        if (!file) throw std::runtime_error("Failed to open " + path);
-        std::string contents((std::istreambuf_iterator<char>(file)),
-                            std::istreambuf_iterator<char>());
-        return contents;
-    }
+std::vector<uint8_t> read_file(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("Failed to open " + path);
 
-    void initLLVM() {
-        static bool initialized = false;
-        if (initialized) return;
+    file.seekg(0, std::ios::end);
+    size_t size = file.tellg();
+    file.seekg(0);
 
-        initialized = true;
-        llvm::InitializeNativeTarget();
-        llvm::InitializeNativeTargetAsmPrinter();
-        llvm::InitializeNativeTargetAsmParser();
+    std::vector<uint8_t> buffer(size);
+    file.read(reinterpret_cast<char*>(buffer.data()), size);
+    return buffer;
+}
 
-        auto jitOrErr = llvm::orc::LLJITBuilder().create();
-        if (!jitOrErr) {
-            llvm::errs() << "Failed to create LLJIT\n";
-            exit(1);
+Contract::FnPtr load_wasm_as_fnptr(const std::string& wasm_path) {
+    auto wasm_bytes = ContractLoader::read_file(wasm_path);
+
+    IM3Environment env = m3_NewEnvironment();
+    if (!env) throw std::runtime_error("Failed to create Wasm environment");
+
+    IM3Runtime runtime = m3_NewRuntime(env, 64*1024, nullptr);
+    if (!runtime) throw std::runtime_error("Failed to create Wasm runtime");
+
+    IM3Module module;
+    M3Result result = m3_ParseModule(env, &module, wasm_bytes.data(), wasm_bytes.size());
+    if (result) throw std::runtime_error("Failed to parse WASM: " + std::string(result));
+
+    result = m3_LoadModule(runtime, module);
+    if (result) throw std::runtime_error("Failed to load WASM module: " + std::string(result));
+
+    IM3Function fn;
+    result = m3_FindFunction(&fn, runtime, "on_event");
+    if (result) throw std::runtime_error("Failed to find function on_event: " + std::string(result));
+
+    // создаём адаптер для Contract::FnPtr
+    return [runtime, fn](double price) -> int32_t {
+        // подготовка аргументов
+        uint32_t arg = static_cast<uint32_t>(price);  // если функция принимает uint32_t
+        const void* args[1] = { &arg };
+
+        // вызов WASM-функции
+        M3Result res = m3_Call(fn, 1, args);
+        if (res) {
+            std::cerr << "WASM call failed: " << res << std::endl;
+            return 0;
         }
-        JIT = std::move(*jitOrErr);
-    }
 
-    Contract::FnPtr compileIRToFnPtr(const std::string& llvm_ir, const std::string& func_name) {
-        initLLVM();
-
-        llvm::SMDiagnostic err;
-        auto ctx = std::make_unique<llvm::LLVMContext>();
-
-        auto module = llvm::parseAssemblyString(llvm_ir, err, *ctx);
-        if (!module) {
-            err.print("ContractLoader", llvm::errs());
-            throw std::runtime_error("Failed to parse LLVM IR");
+        // получение результата
+        uint32_t ret = 0;
+        const void* retPtrs[1] = { &ret };  // массив указателей на возвращаемые значения
+        res = m3_GetResults(fn, 1, retPtrs);  // 1 = количество возвращаемых значений
+        if (res) {
+            std::cerr << "WASM get result failed: " << res << std::endl;
+            return 0;
         }
 
-        llvm::orc::ThreadSafeModule tsm(std::move(module), std::move(ctx));
+        return static_cast<int32_t>(ret);
+    };
+}
 
-        if (auto err2 = JIT->addIRModule(std::move(tsm))) {
-            llvm::errs() << "Failed to add module to JIT\n";
-            exit(1);
-        }
 
-        auto sym = JIT->lookup(func_name);
-        if (!sym) {
-            llvm::errs() << "Failed to lookup symbol: " << func_name << "\n";
-            exit(1);
-        }
 
-        llvm::orc::ExecutorAddr executorAddr = *sym;
-
-        uintptr_t fn_address = executorAddr.getValue();
-        return reinterpret_cast<Contract::FnPtr>(fn_address);
-    }
-
-    std::unique_ptr<Contract> load_contract_from_ll(const std::string& ll_path) {
-        std::string llvm_ir = read_file(ll_path);
-        auto fn_ptr = compileIRToFnPtr(llvm_ir, "on_event");
-        return std::make_unique<Contract>(fn_ptr);
-    }
-
-    void load_contracts_from_folder(const std::string& folder_path) {
-        namespace fs = std::filesystem;
-        for (auto& entry : fs::directory_iterator(folder_path)) {
-            if (entry.path().extension() == ".ll") {  // LLVM IR файлы
-                std::string symbol = entry.path().stem().string();
-                contracts_[symbol] = load_contract_from_ll(entry.path().string());
-                std::cout << "Loaded contract for symbol: " << symbol << std::endl;
-            }
+void load_contracts_from_folder(const std::string& folder_path) {
+    namespace fs = std::filesystem;
+    for (const auto& entry : fs::directory_iterator(folder_path)) {
+        if (entry.path().extension() == ".wasm") {
+            std::string symbol = entry.path().stem().string();
+            contracts_[symbol] = std::make_unique<Contract>(load_wasm_as_fnptr(entry.path().string()));
+            std::cout << "Loaded WASM contract: " << symbol << std::endl;
         }
     }
+}
 
-    Contract* get_contract(const std::string& symbol) {
-        auto it = contracts_.find(symbol);
-        return (it != contracts_.end()) ? it->second.get() : nullptr;
-    }
+Contract* get_contract(const std::string& symbol) {
+    auto it = contracts_.find(symbol);
+    return (it != contracts_.end()) ? it->second.get() : nullptr;
+}
 
 }
